@@ -70,7 +70,6 @@ jobs:
       # También se etiqueta como "latest" para facilitar el deploy
       # ----------------------------------------------------------
       - name: Build y Push imagen a ECR
-        working-directory: ./Springboot-API-REST-DESPACHO
         env:
           ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_BACKEND }}
