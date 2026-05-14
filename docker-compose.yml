@@ -1,16 +1,5 @@
-# ============================================================
-# docker-compose.yml - Backend Despachos + MySQL
-# Stack completo: API Spring Boot + Base de Datos MySQL
-# Uso: docker compose up -d
-# ============================================================
-
 version: "3.9"
-
 services:
-
-  # ----------------------------------------------------------
-  # Servicio: Base de datos MySQL
-  # ----------------------------------------------------------
   mysql:
     image: mysql:8.0
     container_name: despachos-mysql
@@ -23,11 +12,6 @@ services:
     ports:
       - "3306:3306"
     volumes:
-      # Named Volume: elegido sobre bind mount porque:
-      # 1. Docker gestiona el ciclo de vida (no depende de la ruta del host)
-      # 2. Mayor portabilidad entre entornos (local, EC2, CI)
-      # 3. Mejor rendimiento en Linux
-      # Los datos persisten aunque el contenedor se detenga o elimine
       - mysql_data:/var/lib/mysql
     networks:
       - despachos-net
@@ -38,9 +22,6 @@ services:
       retries: 5
       start_period: 30s
 
-  # ----------------------------------------------------------
-  # Servicio: API Spring Boot - Despachos
-  # ----------------------------------------------------------
   backend:
     build:
       context: .
@@ -50,7 +31,7 @@ services:
     ports:
       - "8081:8081"
     environment:
-      DB_ENDPOINT: mysql          # nombre del servicio MySQL en la red interna
+      DB_ENDPOINT: mysql         
       DB_PORT: 3306
       DB_NAME: ${DB_NAME}
       DB_USERNAME: ${DB_USERNAME}
@@ -58,25 +39,12 @@ services:
       JAVA_OPTS: "-Xms256m -Xmx512m"
     depends_on:
       mysql:
-        condition: service_healthy   # espera a que MySQL esté listo
+        condition: service_healthy 
     networks:
       - despachos-net
-
-# ----------------------------------------------------------
-# Volúmenes nombrados (Named Volumes)
-# Persisten los datos de MySQL entre reinicios de contenedor
-# Justificación: named volume es preferido sobre bind mount en producción
-# porque Docker gestiona la ubicación y los permisos automáticamente.
-# ----------------------------------------------------------
 volumes:
   mysql_data:
     name: despachos_mysql_data
-
-# ----------------------------------------------------------
-# Redes internas
-# Aíslan los servicios del exterior; solo el puerto 8081
-# queda expuesto al host (y eventualmente al Frontend)
-# ----------------------------------------------------------
 networks:
   despachos-net:
     driver: bridge
