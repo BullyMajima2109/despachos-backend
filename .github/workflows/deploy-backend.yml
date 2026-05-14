@@ -1,0 +1,127 @@
+# ============================================================
+# .github/workflows/deploy-backend.yml
+# Pipeline CI/CD - Backend Despachos
+#
+# Flujo: push a rama "deploy" →
+#   1. Checkout del código
+#   2. Build de imagen Docker (multi-stage)
+#   3. Push a AWS ECR
+#   4. SSH a EC2 → pull imagen → restart contenedor
+#
+# Secrets requeridos en GitHub (Settings → Secrets → Actions):
+#   AWS_ACCESS_KEY_ID      : Credenciales AWS
+#   AWS_SECRET_ACCESS_KEY  : Credenciales AWS
+#   AWS_SESSION_TOKEN      : Token de sesión (AWS Academy)
+#   AWS_REGION             : Región (ej: us-east-1)
+#   ECR_REGISTRY           : URL del registry (ej: 123456789.dkr.ecr.us-east-1.amazonaws.com)
+#   ECR_REPOSITORY_BACKEND : Nombre del repo ECR (ej: despachos-backend)
+#   EC2_BACKEND_HOST       : IP pública o privada de la instancia EC2 backend
+#   EC2_SSH_KEY            : Contenido de la clave privada .pem (-----BEGIN RSA PRIVATE KEY-----)
+#   EC2_USER               : Usuario SSH (ej: ec2-user o ubuntu)
+#   DB_ENDPOINT            : Endpoint RDS o IP del contenedor MySQL
+#   DB_PORT                : Puerto MySQL
+#   DB_NAME                : Nombre de la base de datos
+#   DB_USERNAME            : Usuario de la base de datos
+#   DB_PASSWORD            : Contraseña de la base de datos
+# ============================================================
+
+name: CI/CD Backend Despachos
+
+# Trigger: solo se activa con push a la rama "deploy"
+on:
+  push:
+    branches:
+      - deploy
+
+jobs:
+  build-push-deploy:
+    name: Build → Push ECR → Deploy EC2
+    runs-on: ubuntu-latest
+
+    steps:
+      # ----------------------------------------------------------
+      # Paso 1: Checkout del código fuente
+      # ----------------------------------------------------------
+      - name: Checkout código fuente
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------
+      # Paso 2: Configurar credenciales AWS
+      # Las credenciales vienen de GitHub Secrets (nunca hardcodeadas)
+      # ----------------------------------------------------------
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # ----------------------------------------------------------
+      # Paso 3: Login a Amazon ECR
+      # ----------------------------------------------------------
+      - name: Login a Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ----------------------------------------------------------
+      # Paso 4: Build de la imagen Docker y push a ECR
+      # Se usa el SHA del commit como tag para trazabilidad
+      # También se etiqueta como "latest" para facilitar el deploy
+      # ----------------------------------------------------------
+      - name: Build y Push imagen a ECR
+        working-directory: ./Springboot-API-REST-DESPACHO
+        env:
+          ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_BACKEND }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          echo "Construyendo imagen: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:latest" >> $GITHUB_ENV
+
+      # ----------------------------------------------------------
+      # Paso 5: Deploy en instancia EC2 vía SSH
+      # Se conecta a la instancia, autentica en ECR,
+      # descarga la imagen nueva y reinicia el contenedor
+      # ----------------------------------------------------------
+      - name: Deploy en EC2 (Backend)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_BACKEND_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_SESSION_TOKEN
+          script: |
+            # Autenticar Docker con ECR desde la instancia EC2
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
+              docker login --username AWS --password-stdin ${{ secrets.ECR_REGISTRY }}
+
+            # Detener y eliminar el contenedor anterior si existe
+            docker stop despachos-backend || true
+            docker rm despachos-backend || true
+
+            # Descargar la imagen más reciente
+            docker pull ${{ secrets.ECR_REGISTRY }}/${{ secrets.ECR_REPOSITORY_BACKEND }}:latest
+
+            # Iniciar el nuevo contenedor con variables de entorno
+            docker run -d \
+              --name despachos-backend \
+              --restart unless-stopped \
+              -p 8081:8081 \
+              -e DB_ENDPOINT=${{ secrets.DB_ENDPOINT }} \
+              -e DB_PORT=${{ secrets.DB_PORT }} \
+              -e DB_NAME=${{ secrets.DB_NAME }} \
+              -e DB_USERNAME=${{ secrets.DB_USERNAME }} \
+              -e DB_PASSWORD=${{ secrets.DB_PASSWORD }} \
+              -e JAVA_OPTS="-Xms256m -Xmx512m" \
+              --network despachos-network \
+              ${{ secrets.ECR_REGISTRY }}/${{ secrets.ECR_REPOSITORY_BACKEND }}:latest
+
+            # Limpiar imágenes antiguas para liberar espacio en disco
+            docker image prune -f
+
+            echo "Deploy backend completado exitosamente"
